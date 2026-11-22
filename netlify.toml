@@ -2,6 +2,10 @@
   command = "npm run build"
   publish = "build"
 
+[build.environment]
+  # Netlify's build fails loading the react-app/jest ESLint config; linting isn't needed to deploy
+  DISABLE_ESLINT_PLUGIN = "true"
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
