@@ -35,6 +35,45 @@ const airtableHeaders = {
 
 const airtableUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${AIRTABLE_TABLE_NAME}`;
 
+// Weather forecast (Open-Meteo, free, no API key) for Dimond Park, Oakland
+const WEATHER_DAYS_AHEAD = 14;
+const weatherUrl = 'https://api.open-meteo.com/v1/forecast'
+  + '?latitude=37.8017&longitude=-122.2143'
+  + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max'
+  + '&hourly=weather_code,temperature_2m,precipitation_probability,wind_speed_10m'
+  + '&temperature_unit=fahrenheit&wind_speed_unit=mph'
+  + '&timezone=America%2FLos_Angeles&forecast_days=16';
+
+// WMO weather codes -> icon + label
+const describeWeatherCode = (code) => {
+  if (code === 0) return { icon: '☀️', label: 'Clear' };
+  if (code <= 2) return { icon: '🌤️', label: 'Partly cloudy' };
+  if (code === 3) return { icon: '☁️', label: 'Cloudy' };
+  if (code <= 48) return { icon: '🌫️', label: 'Fog' };
+  if (code <= 57) return { icon: '🌦️', label: 'Drizzle' };
+  if (code <= 67) return { icon: '🌧️', label: 'Rain' };
+  if (code <= 77) return { icon: '🌨️', label: 'Snow' };
+  if (code <= 82) return { icon: '🌧️', label: 'Showers' };
+  if (code <= 86) return { icon: '🌨️', label: 'Snow showers' };
+  return { icon: '⛈️', label: 'Thunderstorms' };
+};
+
+// Pull the start hour (0-23) out of free-text times like "6:00 PM - 8:00 PM"
+const parseStartHour = (timeText) => {
+  const match = (timeText || '').match(/(\d{1,2})(?::\d{2})?\s*(am|pm)?/i);
+  if (!match) return null;
+  let hour = Number(match[1]);
+  const meridiem = (match[2] || (timeText.match(/(am|pm)/i) || [])[1] || '').toLowerCase();
+  if (hour > 23) return null;
+  // No AM/PM given: these are evening matches, so read 1-11 as PM
+  if (meridiem === 'pm' || (!meridiem && hour >= 1 && hour <= 11)) {
+    if (hour < 12) hour += 12;
+  } else if (meridiem === 'am' && hour === 12) {
+    hour = 0;
+  }
+  return hour;
+};
+
 const DimondTennisApp = () => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [currentView, setCurrentView] = useState('matches');
@@ -72,6 +111,8 @@ const DimondTennisApp = () => {
   });
 
   const [viewingPdf, setViewingPdf] = useState({ isOpen: false, data: null, title: '' });
+
+  const [forecast, setForecast] = useState(null);
 
   const [newMatch, setNewMatch] = useState({
     date: '',
@@ -824,6 +865,57 @@ const DimondTennisApp = () => {
     fetchMatches();
   }, [isAuthenticated]);
 
+  // Load the weather forecast when authenticated
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    fetch(weatherUrl)
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        return response.json();
+      })
+      .then(data => setForecast(data))
+      .catch(error => console.error('Error fetching weather:', error));
+  }, [isAuthenticated]);
+
+  // Forecast for a match date, or null if it's more than two weeks out or unavailable
+  const getMatchWeather = (match) => {
+    if (!forecast || !match.date) return null;
+
+    const [year, month, day] = match.date.split('-').map(Number);
+    const matchDay = new Date(year, month - 1, day);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const daysAway = Math.round((matchDay - today) / (1000 * 60 * 60 * 24));
+    if (daysAway < 0 || daysAway > WEATHER_DAYS_AHEAD) return null;
+
+    const dayIndex = forecast.daily.time.indexOf(match.date);
+    if (dayIndex === -1) return null;
+
+    const weather = {
+      ...describeWeatherCode(forecast.daily.weather_code[dayIndex]),
+      high: Math.round(forecast.daily.temperature_2m_max[dayIndex]),
+      low: Math.round(forecast.daily.temperature_2m_min[dayIndex]),
+      rainChance: forecast.daily.precipitation_probability_max[dayIndex],
+      atStart: null
+    };
+
+    const startHour = parseStartHour(match.time);
+    if (startHour !== null) {
+      const hourIndex = forecast.hourly.time.indexOf(`${match.date}T${String(startHour).padStart(2, '0')}:00`);
+      if (hourIndex !== -1) {
+        weather.atStart = {
+          ...describeWeatherCode(forecast.hourly.weather_code[hourIndex]),
+          temp: Math.round(forecast.hourly.temperature_2m[hourIndex]),
+          rainChance: forecast.hourly.precipitation_probability[hourIndex],
+          wind: Math.round(forecast.hourly.wind_speed_10m[hourIndex])
+        };
+      }
+    }
+
+    return weather;
+  };
+
   // Component definitions
   const SignupModal = () => {
     if (!signupModal.isOpen) return null;
@@ -1482,6 +1574,7 @@ const DimondTennisApp = () => {
 
   const MatchCard = ({ match, isArchived = false }) => {
     const playerLimit = getPlayerLimit(match.courts);
+    const weather = isArchived ? null : getMatchWeather(match);
 
     return (
       <div key={match.id} className="bg-white rounded-lg shadow-md overflow-hidden">
@@ -1535,6 +1628,33 @@ const DimondTennisApp = () => {
             </div>
           </div>
         </div>
+
+        {weather && (
+          <div className="px-4 py-3 border-b bg-sky-50 flex items-center justify-between text-sm">
+            {weather.atStart ? (
+              <div className="flex items-center">
+                <span className="text-2xl mr-2" aria-hidden="true">{weather.atStart.icon}</span>
+                <div>
+                  <div className="font-medium text-gray-900">
+                    {weather.atStart.temp}°F · {weather.atStart.label}
+                  </div>
+                  <div className="text-gray-600 text-xs">
+                    At start: {weather.atStart.rainChance}% rain · wind {weather.atStart.wind} mph
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center">
+                <span className="text-2xl mr-2" aria-hidden="true">{weather.icon}</span>
+                <div className="font-medium text-gray-900">{weather.label}</div>
+              </div>
+            )}
+            <div className="text-right text-xs text-gray-600">
+              <div>H {weather.high}° / L {weather.low}°</div>
+              <div>{weather.rainChance}% rain (day)</div>
+            </div>
+          </div>
+        )}
 
         {!isArchived && (
           <div className="p-4 border-b bg-gray-50">
